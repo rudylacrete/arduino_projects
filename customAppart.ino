@@ -8,6 +8,10 @@ unsigned long SLEEP_TIME = 200; // Sleep time between reports (in milliseconds)
 #define PIR_CHILD_ID 6   // Id of the sensor child
 #define RFID_CHILD_ID 7
 
+#define SYS_STATE_ADDRESS 0
+#define BOOT_SET_PERIOD 10000
+#define RFID_DEBOUNCE_TIME 1000
+
 MySensor gw;
 // Initialize motion message
 MyMessage msg(PIR_CHILD_ID, V_TRIPPED);
@@ -17,7 +21,9 @@ MyMessage msgRfid(RFID_CHILD_ID, V_TRIPPED);
 #define SS_PIN    7   // RFID SS PIN
 
 MFRC522 mfrc522(SS_PIN, RST_PIN);  // Create MFRC522 instance
-boolean systemUnlocked = false;
+boolean alarmActivated = false; //deactivate by default on boot
+unsigned long lastCardCheck = 0; //to debounce rfid scan event
+unsigned long bootTime = millis();
 const byte authorizedUid[] = {0xFF, 0xFF, 0xFF, 0xFF};
 
 void setup()  
@@ -25,6 +31,7 @@ void setup()
   SPI.begin();      // Init SPI bus
   mfrc522.PCD_Init();   // Init MFRC522
   gw.begin();
+  Serial.begin(9600);
 
   // Send the sketch version information to the gateway and Controller
   gw.sendSketchInfo("Motion Sensor", "1.0");
@@ -33,29 +40,46 @@ void setup()
   // Register all sensors to gw (they will be created as child devices)
   gw.present(PIR_CHILD_ID, S_MOTION);
   gw.present(RFID_CHILD_ID, S_DOOR);
+
+  // set the alarm as deactivated on reboot
+  gw.send(msgRfid.set("0"));
   
 }
 
-void loop()     
-{     
-  // Read digital motion value
-  boolean tripped = digitalRead(DIGITAL_INPUT_SENSOR) == HIGH;
-  boolean authorizedTagUid = false;
+boolean isSystemBootSetPeriod(){
+  return millis() - bootTime <= BOOT_SET_PERIOD && lastCardCheck == 0;
+}
 
+void loop()     
+{ 
+  // card check
+  boolean authorizedTagUid = false;
   if( mfrc522.PICC_IsNewCardPresent() && mfrc522.PICC_ReadCardSerial()) {
     // TODO check tag from EEPROM
     printUid(mfrc522.uid.uidByte);
     authorizedTagUid = compareUid((byte*)authorizedUid, mfrc522.uid.uidByte);
   }
 
-  if(authorizedTagUid == true){
-    systemUnlocked = !systemUnlocked;
+  if( authorizedTagUid == true && (!lastCardCheck || millis() - lastCardCheck >= 2000) ) {
+    lastCardCheck = millis();
+    alarmActivated = !alarmActivated;
+    gw.send(msgRfid.set(alarmActivated?"1":"0"));  // Send tripped value to gw
+    gw.wait(SLEEP_TIME);
+    gw.send(msgRfid.set(alarmActivated?"1":"0"));  // Send tripped value to gw
   }
-        
-  Serial.println(tripped);
-  Serial.println(systemUnlocked);
+  
+  if( isSystemBootSetPeriod() || (lastCardCheck && !alarmActivated ) ) {
+    return;
+  }
+
+  //if no card has been scanned during set boot period, activate alarm
+  if(!lastCardCheck) {
+    alarmActivated = true;
+  }
+
+  // Read digital motion value
+  boolean tripped = digitalRead(DIGITAL_INPUT_SENSOR) == HIGH;
   gw.send(msg.set(tripped?"1":"0"));  // Send tripped value to gw
-  gw.send(msgRfid.set(systemUnlocked?"1":"0"));  // Send tripped value to gw 
  
   // Sleep until interrupt comes in on motion sensor. Send update every two minute. 
   gw.sleep(INTERRUPT, CHANGE, SLEEP_TIME);
